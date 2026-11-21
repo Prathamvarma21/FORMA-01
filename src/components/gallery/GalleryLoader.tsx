@@ -16,7 +16,7 @@ export const GalleryLoader: React.FC<GalleryLoaderProps> = ({ onComplete }) => {
       onComplete: () => {
         gsap.to(".loader-container", {
           opacity: 0,
-          duration: 0.8,
+          duration: 1.1,
           ease: "power2.inOut",
           onComplete: () => {
             setHidden(true);
@@ -26,14 +26,18 @@ export const GalleryLoader: React.FC<GalleryLoaderProps> = ({ onComplete }) => {
       },
     });
 
-    // Subtle, elegant logo entrance and hold
+    // Show logo cleanly, hold it long enough for WebGL textures to fully load
     tl.fromTo(
       ".loader-logo",
       { opacity: 0, scale: 0.95 },
       { opacity: 1, scale: 1, duration: 0.9, ease: "power2.out" }
     ).to(".loader-logo", {
-      opacity: 0.9,
-      duration: 0.6,
+      opacity: 1,
+      duration: 1.6, // extra hold = textures finish loading during this pause
+      ease: "none",
+    }).to(".loader-logo", {
+      opacity: 0.85,
+      duration: 0.4,
       ease: "sine.inOut",
     });
 

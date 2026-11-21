@@ -165,7 +165,10 @@ export const GalleryThreeScene: React.FC<GalleryThreeSceneProps> = ({
   const [viewMode, setViewMode] = useState<"WALK" | "FRONT">("WALK");
   const [activeArtwork, setActiveArtwork] = useState<Artwork>(ARTWORKS[0]);
   const [activeIndex, setActiveIndex] = useState(0);
+  // Keep a ref mirror of activeIndex so the render loop never causes a re-render
   const activeIndexRef = useRef(0);
+  // Ref for activeArtwork so render loop can read it without stale closure
+  const activeArtworkRef = useRef<Artwork>(ARTWORKS[0]);
 
   // Corridor progress (0 to 1)
   const progressRef = useRef(0.06);
@@ -173,9 +176,12 @@ export const GalleryThreeScene: React.FC<GalleryThreeSceneProps> = ({
   const isDraggingRef = useRef(false);
   const lastPointerXRef = useRef(0);
   const lastPointerYRef = useRef(0);
+  // dragVelocity is normalised (pixels/ms) — keep it small
   const dragVelocityRef = useRef(0);
   const lastTimeRef = useRef(0);
   const hasDraggedRef = useRef(false);
+  // Track whether all textures have finished loading
+  const texturesReadyRef = useRef(false);
 
   // Mouse parallax
   const mousePosRef = useRef({ x: 0, y: 0 });
@@ -261,6 +267,7 @@ export const GalleryThreeScene: React.FC<GalleryThreeSceneProps> = ({
     activeIndexRef.current = idx;
     setActiveIndex(idx);
     setActiveArtwork(targetCoords.artwork);
+    activeArtworkRef.current = targetCoords.artwork;
     
     // Synchronize both progress markers directly to this artwork
     targetProgressRef.current = targetCoords.progressT;
@@ -564,7 +571,14 @@ export const GalleryThreeScene: React.FC<GalleryThreeSceneProps> = ({
     scene.add(startWallMesh);
 
     // FORMA / 01 Logo in Exact Center of End Wall
-    const textureLoader = new THREE.TextureLoader();
+    // Use a LoadingManager so we know when ALL textures are ready → no blink
+    const loadingManager = new THREE.LoadingManager();
+    texturesReadyRef.current = false;
+    loadingManager.onLoad = () => {
+      texturesReadyRef.current = true;
+    };
+
+    const textureLoader = new THREE.TextureLoader(loadingManager);
     const logoTexture = textureLoader.load("/images/logo.png");
     logoTexture.colorSpace = THREE.SRGBColorSpace;
     logoTexture.minFilter = THREE.LinearFilter;
@@ -639,10 +653,13 @@ export const GalleryThreeScene: React.FC<GalleryThreeSceneProps> = ({
       matMesh.position.z = 0.032;
       group.add(matMesh);
 
-      // Canvas with Artwork Texture
+      // Canvas with Artwork Texture — use anisotropy for crisp look at angles
       const canvasTexture = textureLoader.load(artwork.image);
       canvasTexture.colorSpace = THREE.SRGBColorSpace;
       canvasTexture.minFilter = THREE.LinearMipmapLinearFilter;
+      canvasTexture.magFilter = THREE.LinearFilter;
+      canvasTexture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+      canvasTexture.generateMipmaps = true;
 
       const canvasMaterial = new THREE.MeshStandardMaterial({
         map: canvasTexture,
@@ -747,12 +764,16 @@ export const GalleryThreeScene: React.FC<GalleryThreeSceneProps> = ({
       isDraggingRef.current = false;
 
       if (viewModeRef.current === "WALK" && !isAnimatingCamRef.current) {
-        const inertia = -dragVelocityRef.current * 0.08;
+        // Gentle inertia: cap velocity and use a small multiplier
+        const rawInertia = -dragVelocityRef.current * 0.045;
+        // clamp so a fast flick never overshoots more than ~0.12 of the full track
+        const clampedInertia = Math.max(-0.12, Math.min(0.12, rawInertia));
         targetProgressRef.current = Math.max(
           0.02,
-          Math.min(0.98, targetProgressRef.current + inertia)
+          Math.min(0.98, targetProgressRef.current + clampedInertia)
         );
       }
+      dragVelocityRef.current = 0;
     };
 
     const onWheel = (e: WheelEvent) => {
@@ -764,7 +785,7 @@ export const GalleryThreeScene: React.FC<GalleryThreeSceneProps> = ({
       const delta = Math.abs(e.deltaY) > Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
       targetProgressRef.current = Math.max(
         0.02,
-        Math.min(0.98, targetProgressRef.current + delta * 0.00065)
+        Math.min(0.98, targetProgressRef.current + delta * 0.00042)
       );
     };
 
@@ -813,9 +834,10 @@ export const GalleryThreeScene: React.FC<GalleryThreeSceneProps> = ({
 
       if (!isAnimatingCamRef.current) {
         if (viewModeRef.current === "WALK") {
+          // Silky smooth lerp — 0.055 gives butter-smooth easing without lag
           const diff = targetProgressRef.current - progressRef.current;
-          if (Math.abs(diff) > 0.0001) {
-            progressRef.current += diff * 0.08;
+          if (Math.abs(diff) > 0.00005) {
+            progressRef.current += diff * 0.055;
           } else {
             progressRef.current = targetProgressRef.current;
           }
@@ -834,7 +856,8 @@ export const GalleryThreeScene: React.FC<GalleryThreeSceneProps> = ({
           currentLookAtRef.current.set(targetLookX, camY + mouseLagRef.current.y * -0.15, targetLookZ);
           camera.lookAt(currentLookAtRef.current);
 
-          // Find closest artwork
+          // Find closest artwork — ONLY update React state when it actually changes
+          // using ref comparison so we never trigger a re-render from inside the loop
           let closestIdx = 0;
           let minDistance = 9999;
           artworkPlacements.forEach((p, idx) => {
@@ -845,13 +868,15 @@ export const GalleryThreeScene: React.FC<GalleryThreeSceneProps> = ({
             }
           });
 
-          if (closestIdx !== activeIndex) {
+          if (closestIdx !== activeIndexRef.current) {
+            activeIndexRef.current = closestIdx;
+            // Batch the state update — React will coalesce it, no Three.js teardown
             setActiveIndex(closestIdx);
             setActiveArtwork(ARTWORKS[closestIdx]);
           }
         } else {
-          // Subtle Front View Parallax
-          const targetCoords = getFrontViewCoordinates(activeIndex);
+          // Subtle Front View Parallax — use activeIndexRef, never stale activeIndex
+          const targetCoords = getFrontViewCoordinates(activeIndexRef.current);
           camera.position.x = targetCoords.camPos.x + mouseLagRef.current.x * 0.12;
           camera.position.y = targetCoords.camPos.y + mouseLagRef.current.y * 0.08;
           camera.position.z = targetCoords.camPos.z + mouseLagRef.current.x * -0.12;
@@ -901,7 +926,10 @@ export const GalleryThreeScene: React.FC<GalleryThreeSceneProps> = ({
       }
       renderer.dispose();
     };
-  }, [transitionToFrontView, returnToWalkView, getFrontViewCoordinates, activeIndex, onArtworkHover]);
+  // The scene is built once and never torn down just because activeIndex changes —
+  // that was the root cause of the blinking/flickering during scroll.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [transitionToFrontView, returnToWalkView, getFrontViewCoordinates, onArtworkHover]);
 
   // Stepping controls
   const handlePrev = () => {
